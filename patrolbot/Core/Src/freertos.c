@@ -134,6 +134,14 @@ void MX_FREERTOS_Init(void) {
   * @param  argument: Not used
   * @retval None
   */
+/**
+ * @brief   底盘运动控制任务 (MotionTask)
+ * @details
+ * - 优先级：osPriorityRealtime (最高优先级)
+ * - 职责：负责底盘跨任务熔断拦截与闭环 PID 运动学解算。利用其最高抢占权，实现 0 延迟的安全响应。
+ * @param   argument 未使用
+ * @retval  None
+ */
 /* USER CODE END Header_StartDefaultTask */
 void StartDefaultTask(void *argument)
 {
@@ -162,15 +170,12 @@ extern TIM_HandleTypeDef htim2;
 * @retval None
 */
 /**
- * @brief  运动控制与里程计核心任务 (MotionTask)
- * @param  argument: FreeRTOS 任务传参 (未使用)
- * @retval None
- * @note   【硬件资源占用清单】
- * - 动力输出: TIM2 (CH1~CH4) 控制四路电机 PWM
- * - 左轮感知: TIM3 (Encoder Mode)
- * - 右轮感知: TIM1 (Encoder Mode)
- * - 姿态感知: MPU6050 (I2C 轮询读取 DMP 解算)
- * - 遥测链路: USART3 高速串口上报
+ * @brief   底盘运动控制任务 (MotionTask)
+ * @details
+ * - 优先级：osPriorityRealtime (最高优先级)
+ * - 职责：负责底盘跨任务熔断拦截与闭环 PID 运动学解算。利用其最高抢占权，实现 0 延迟的安全响应。
+ * @param   argument 未使用
+ * @retval  None
  */
 /* USER CODE END Header_StartMotionTask */
 void StartMotionTask(void *argument)

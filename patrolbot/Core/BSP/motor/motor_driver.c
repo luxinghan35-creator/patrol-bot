@@ -8,7 +8,10 @@
  *  @brief 电机状态枚举
  */
 typedef enum {MOTOR_STOP, MOTOR_FWD, MOTOR_REV} MotorState_t;
-//初始化
+/**
+ * @brief   底盘 PWM 发生器初始化实现
+ * @retval  None
+ */
 void R3X_Init(void) {
     HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
     HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2);
@@ -72,7 +75,10 @@ static void Set_Direction(MotorID_t id, MotorState_t state) {
             break;
     }
 }
-//设置电机速度
+
+/**
+ * @brief   电机带限幅与极性转换的速度注入逻辑
+ */
 void R3X_Set_Speed(MotorID_t id, int16_t speed) {
     MotorState_t state;
     if (speed > 0) {
@@ -105,6 +111,9 @@ void R3X_Set_Speed(MotorID_t id, int16_t speed) {
 
 }
 
+/**
+ * @brief   坦克式差速运动封装
+ */
 void R3X_Drive_Tank(int16_t speed_L, int16_t speed_R) {
     R3X_Set_Speed(MOTOR_FL, speed_L);
     R3X_Set_Speed(MOTOR_RL, speed_L);

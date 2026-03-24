@@ -7,7 +7,10 @@
 
 #define GY906_ADDR 0xB4     // 0x5A 左移一位，STM32 HAL库要求
 #define REG_OBJ_TEMP 0x07   // 目标物体温度的寄存器地址
-
+/**
+ * @brief   读取目标物体真实温度实现
+ * @retval  float 当前真实温度值(℃) 或 硬件错误码(-999.0f)
+ */
 float R3X_GY906_Read_ObjTemp(void) {
     uint8_t data[3]; // 接收 LSB, MSB, 和 PEC校验位
 

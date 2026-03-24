@@ -70,15 +70,16 @@ int _write(int file, char *ptr, int len)
 #endif
 
 // JY61P 串口状态机专属变量
-uint8_t rx_byte;
-uint8_t rx_buffer[11];
-uint8_t rx_index = 0;
+uint8_t rx_byte; //单字节接收缓冲
+uint8_t rx_buffer[11]; //完整帧缓冲 (0x55 + 10 字节数据)
+uint8_t rx_index = 0; // 当前接收状态索引
 
-// 【核心修改】必须加 volatile！强制每次都从内存读取最新姿态！
+// 实时偏航角，因跨任务共享故加volatile防止编译器优化导致的访问异常
 volatile float current_yaw = 0.0f;
+// 目标偏航角，因跨任务共享故加volatile防止编译器优化导致的访问异常
 volatile float target_yaw = 0.0f;
 
-// 【新增探针】用于监视状态机是否健康解析
+// 【新增探针】用于监视状态机是否健康解析：有效帧发送
 volatile uint32_t rx_frame_cnt = 0;
 
 
@@ -186,6 +187,13 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+/**
+ * @brief   串口数据接收完成中断回调函数 (裸机最高路权)
+ * @details
+ * - 业务逻辑：实现针对 JY61P 姿态传感器的工业级状态机解析。
+ * - 容错机制：严格校验 0x55 帧头与 0x53 角度标识，过滤多余的加速度与角速度帧，确保解算绝对安全。
+ * @param   huart 触发中断的串口句柄
+ */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
   if (huart->Instance == USART3) {
     // --- 工业级强逻辑状态机 ---
@@ -219,18 +227,19 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
   }
 }
 
-// 防死锁抗体保持不变
+/**
+ * @brief   串口通信错误自愈回调函数
+ * @details 应对 DMA/IT 接收中途发生的 ORE (溢出错误) 等硬件异常，强行清除标志位并重启接收。
+ */
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
   if (huart->Instance == USART3) {
+    // 暴力清除 Overrun Error 标志位，防止中断卡死
     __HAL_UART_CLEAR_OREFLAG(huart);
+    //重新接管总线
     HAL_UART_Receive_IT(&huart3, &rx_byte, 1);
   }
 }
-
-
-
-
 
 /* USER CODE END 4 */
 
