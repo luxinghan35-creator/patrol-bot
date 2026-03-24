@@ -1,0 +1,6 @@
+任务名称 (Name),优先级 (Priority),堆栈大小 (Stack Size),入口函数 (Entry Function),核心职责
+Motion_Task,osPriorityRealtime,128 Words,StartMotionTask,动力核心：PID计算、PWM输出 (硬实时) 
+Inspect_Task,osPriorityHigh,256 Words,StartInspectTask,业务大脑：状态机、停车判断、故障自愈 
+Sensor_Task,osPriorityNormal,128 Words,StartSensorTask,感知融合：读取 IMU 和 温度传感器 
+Comm_Task,osPriorityNormal,256 Words,StartCommTask,通讯链路：解析 ESP32 指令 
+Display_Task,osPriorityLow,256 Words,StartDisplayTask,人机交互：OLED 刷新 (允许丢帧) 

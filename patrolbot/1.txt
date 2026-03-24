@@ -1,0 +1,16 @@
+1. 前桥 (Front Axle)
+电机位置	功能	STM32 引脚	截图标签	对应定时器通道
+左前 (FL)	PWM 调速	PA0	TIM2_CH1	TIM2 Channel 1
+	方向控制 1	PB12	FL_DIR1	GPIO Output
+	方向控制 2	PB13	FL_DIR2	GPIO Output
+右前 (FR)	PWM 调速	PA1	TIM2_CH2	TIM2 Channel 2
+	方向控制 1	PB14	FR_DIR1	GPIO Output
+	方向控制 2	PB15	FR_DIR2	GPIO Output
+2. 后桥 (Rear Axle)
+电机位置	功能	STM32 引脚	截图标签	备注 / 风险点
+左后 (RL)	PWM 调速	PA2	TIM2_CH3	TIM2 Channel 3
+	方向控制 1	PB3	RL_DIR1	注意： 默认是 JTAG 引脚
+	方向控制 2	PB4	RL_DIR2	注意： 必须禁用 JTAG 才能用
+右后 (RR)	PWM 调速	PA3	TIM2_CH4	TIM2 Channel 4
+	方向控制 1	PB5	RR_DIR1	GPIO Output
+	方向控制 2	PB9	RR_DIR2

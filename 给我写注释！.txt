@@ -1,0 +1,5 @@
+@brief	Brief Description	简要说明。用一句话总结函数是干嘛的。
+@param	Parameter	参数说明。解释每个输入变量的意义、范围。
+@retval	Return Value	返回值说明。解释函数返回不同值的具体含义。
+@note	Note	特别注解。提醒调用者需要注意的坑（如：此函数非线程安全）。
+@author	Author	作者信息。方便以后出 Bug 了直接找人“算账”。
