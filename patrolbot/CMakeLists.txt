@@ -45,6 +45,11 @@ add_executable(${CMAKE_PROJECT_NAME}
         Core/BSP/oled/oled.c
         Core/BSP/oled/font.h
         Core/BSP/oled/font.c
+        Core/APP/system_def.h
+        Core/APP/chassis/chassis_app.h
+        Core/APP/chassis/chassis_app.c
+        Core/APP/monitor/monitor_app.h
+        Core/APP/monitor/monitor_app.c
 )
 
 # Add STM32CubeMX generated sources
@@ -72,6 +77,11 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
         Core/BSP/oled/oled.h
         Core/BSP/oled/font.c
         Core/BSP/oled/font.h
+        Core/APP/system_def.h
+        Core/APP/chassis/chassis_app.c
+        Core/APP/chassis/chassis_app.h
+        Core/APP/monitor/monitor_app.c
+        Core/APP/monitor/monitor_app.h
 )
 
 # Add include paths
@@ -83,6 +93,9 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
         Core/BSP/i2c_bus
         Core/BSP/gy906
         Core/BSP/oled
+        Core/APP/chassis
+        Core/APP/monitor
+        Core/APP
 )
 
 # Add project symbols (macros)
