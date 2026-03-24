@@ -19,7 +19,6 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "cmsis_os.h"
-#include "dma.h"
 #include "i2c.h"
 #include "tim.h"
 #include "usart.h"
@@ -82,7 +81,6 @@ volatile float target_yaw = 0.0f;
 // 【新增探针】用于监视状态机是否健康解析
 volatile uint32_t rx_frame_cnt = 0;
 
-extern osSemaphoreId_t oled_dma_sem;
 
 /* USER CODE END 0 */
 
@@ -115,7 +113,6 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_DMA_Init();
   MX_TIM2_Init();
   MX_TIM3_Init();
   MX_TIM1_Init();
@@ -231,29 +228,9 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
   }
 }
 
-// DMA 搬砖完成中断回调
-void HAL_I2C_MemTxCpltCallback(I2C_HandleTypeDef *hi2c) {
-  if (hi2c->Instance == I2C1) {
-    // DMA 完工，释放信号量，瞬间唤醒挂起的 DefaultTask
-    osSemaphoreRelease(oled_dma_sem);
-  }
-}
 
-// I2C 错误中断回调（专门用来扑灭中断风暴）
-void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c) {
-  if (hi2c->Instance == I2C1) {
-    // 【终极杀招】在停掉 DMA 之前，先暴力屏蔽 I2C1 的所有硬件中断！
-    // 彻底掐死 TXE 标志位向 CPU 告状的通道，直接从物理层阻断风暴！
-    __HAL_I2C_DISABLE_IT(hi2c, I2C_IT_EVT | I2C_IT_ERR | I2C_IT_BUF);
 
-    // 然后再拔掉 DMA 的氧气管
-    HAL_DMA_Abort(hi2c->hdmatx);
 
-    // 信号量依然不释放。
-    // 等 DefaultTask 里 1000ms 超时后，APP 层会调用 R3X_I2C_Reset()。
-    // R3X_I2C_Reset() 里的 MX_I2C1_Init() 会自动把刚才关掉的中断重新打开，实现完美的硬件浴火重生。
-  }
-}
 
 /* USER CODE END 4 */
 

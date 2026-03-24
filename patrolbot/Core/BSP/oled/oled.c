@@ -26,10 +26,10 @@
 #include "i2c_bus.h"
 #include <math.h>
 #include <stdlib.h>
-#include "cmsis_os.h"
+
 
 extern I2C_HandleTypeDef hi2c1;
-extern osSemaphoreId_t oled_dma_sem;
+
 
 // OLED器件地址
 #define OLED_ADDRESS 0x78
@@ -53,9 +53,9 @@ uint8_t OLED_GRAM[OLED_PAGE][OLED_COLUMN];
  */
 void OLED_Send(uint8_t *data, uint8_t len)
 {
-  if (HAL_I2C_Master_Transmit(&hi2c1, OLED_ADDRESS, data, len, 10) != HAL_OK)
-  {
-    R3X_I2C_Reset();
+  // 使用 100ms 超时容忍度，允许底盘 MotionTask 无情抢占
+  if(HAL_I2C_Master_Transmit(&hi2c1, OLED_ADDRESS, data, len, 100) != HAL_OK) {
+    R3X_I2C_Reset(); // 遇错直接重置硬件状态机
   }
 }
 
@@ -80,7 +80,7 @@ void OLED_Init()
   OLED_SendCmd(0xAE); /*关闭显示 display off*/
 
   OLED_SendCmd(0x20);
-  OLED_SendCmd(0x00);//设置内存地址模式 00水平寻址模式 01垂直寻址模式 10页寻址模式
+  OLED_SendCmd(0x10);//设置内存地址模式 00水平寻址模式 01垂直寻址模式 10页寻址模式
 
   OLED_SendCmd(0xB0);
 
@@ -180,27 +180,15 @@ void OLED_NewFrame()
  */
 void OLED_ShowFrame()
 {
-  // 设置列地址范围: 0 ~ 127
-  OLED_SendCmd(0x21);
-  OLED_SendCmd(0x00);
-  OLED_SendCmd(0x7F);
-
-  // 设置页地址范围: 0 ~ 7
-  OLED_SendCmd(0x22);
-  OLED_SendCmd(0x00);
-  OLED_SendCmd(0x07);
-
-  // 启动 DMA，一次性把 1024 字节显存全轰过去！0x40 是告诉 OLED 后面跟着的全是显存数据
-  if (HAL_I2C_Mem_Write_DMA(&hi2c1, OLED_ADDRESS, 0x40, I2C_MEMADD_SIZE_8BIT, (uint8_t*)OLED_GRAM, 1024) == HAL_OK) {
-
-    // 指令下发完毕，CPU 立刻交出控制权，挂起任务去休息或去算 PID
-    // 等待硬件 DMA 搬完 1024 字节并触发中断回调释放信号量，超时时间设为 100ms
-    if (osSemaphoreAcquire(oled_dma_sem, 1000) != osOK) {
-      // 如果 100ms 还没搬完，说明 I2C 物理层死锁了，触发暴力复位保全系统
-      R3X_I2C_Reset();
-    }
-  } else {
-    R3X_I2C_Reset();
+  static uint8_t sendBuffer[OLED_COLUMN + 1];
+  sendBuffer[0] = 0x40; // 声明后续是数据
+  for (uint8_t i = 0; i < OLED_PAGE; i++)
+  {
+    OLED_SendCmd(0xB0 + i); // 设置页地址
+    OLED_SendCmd(0x00);     // 设置列地址低4位
+    OLED_SendCmd(0x10);     // 设置列地址高4位
+    memcpy(sendBuffer + 1, OLED_GRAM[i], OLED_COLUMN);
+    OLED_Send(sendBuffer, OLED_COLUMN + 1); // 调用我们的防死锁发送
   }
 }
 

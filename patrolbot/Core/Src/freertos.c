@@ -55,7 +55,7 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
-osSemaphoreId_t oled_dma_sem;
+
 /* USER CODE END Variables */
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
@@ -97,7 +97,7 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE END RTOS_MUTEX */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
-  oled_dma_sem = osSemaphoreNew(1, 0, NULL);
+
   /* add semaphores, ... */
   /* USER CODE END RTOS_SEMAPHORES */
 
