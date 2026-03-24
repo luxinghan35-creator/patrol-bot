@@ -55,7 +55,8 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
-
+// 0: 系统正常运行 | 1: 触发超温熔断，底盘锁死
+volatile uint8_t system_alarm_flag = 0;
 /* USER CODE END Variables */
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
@@ -144,31 +145,38 @@ void StartDefaultTask(void *argument)
   /* Infinite loop */
   for(;;)
   {
-    // 2. 读取温度
     float obj_temp = R3X_GY906_Read_ObjTemp();
 
-    // 3. 开启新的一帧显存
-    OLED_NewFrame();
+    // 【新增：业务判定逻辑】
+    // 过滤掉 -999 等通信错误码，只在真实高温时触发报警
+    if (obj_temp > 60.0f && obj_temp < 500.0f) {
+      system_alarm_flag = 1; // 触发熔断
+    } else if (obj_temp < 50.0f) {
+      system_alarm_flag = 0; // 温度降下来后，自动解除熔断 (也可以设计为必须手动复位)
+    }
 
+    OLED_NewFrame();
     char buf[32];
 
-    // 第一行：打印红外温度 (使用 16x8 大号英文字体)
-    sprintf(buf, "Temp: %d C", (int)obj_temp);
-    OLED_PrintASCIIString(0, 0, buf, &afont16x8, OLED_COLOR_NORMAL);
+    if (system_alarm_flag == 1) {
+      // 【警报画面】：反色闪烁，极具视觉冲击力
+      OLED_PrintASCIIString(0, 0, "!! ALARM !!", &afont16x8, OLED_COLOR_REVERSED);
+      sprintf(buf, "TEMP: %d C", (int)obj_temp);
+      OLED_PrintASCIIString(0, 20, buf, &afont16x8, OLED_COLOR_NORMAL);
+      OLED_PrintASCIIString(0, 40, "MOTORS LOCKED", &afont16x8, OLED_COLOR_NORMAL);
+    } else {
+      // 【正常画面】：你原来的遥测界面
+      sprintf(buf, "Temp: %d C", (int)obj_temp);
+      OLED_PrintASCIIString(0, 0, buf, &afont16x8, OLED_COLOR_NORMAL);
 
-    // 第二行：打印偏航角
-    sprintf(buf, "Yaw: %d", (int)current_yaw);
-    OLED_PrintASCIIString(0, 20, buf, &afont16x8, OLED_COLOR_NORMAL);
+      sprintf(buf, "Yaw: %d", (int)current_yaw);
+      OLED_PrintASCIIString(0, 20, buf, &afont16x8, OLED_COLOR_NORMAL);
 
-    // 第三行：打印系统状态/帧率 (证明系统没卡死)
-    sprintf(buf, "SYS OK | %lu", rx_frame_cnt);
-    OLED_PrintASCIIString(0, 40, buf, &afont16x8, OLED_COLOR_NORMAL);
+      sprintf(buf, "SYS OK | %lu", rx_frame_cnt);
+      OLED_PrintASCIIString(0, 40, buf, &afont16x8, OLED_COLOR_NORMAL);
+    }
 
-    // 4. 将显存数据推送到屏幕
     OLED_ShowFrame();
-
-    // 5. 依然保持串口日志输出，作为双重保险
-    printf("Temp: %d C | Yaw: %d | Frames: %lu\r\n", (int)obj_temp, (int)current_yaw, rx_frame_cnt);
 
     osDelay(100);
   }
@@ -221,6 +229,17 @@ void StartMotionTask(void *argument)
   /* Infinite loop */
   for(;;)
   {
+
+    // 【新增：最高优先级的物理熔断拦截】
+    if (system_alarm_flag == 1) {
+      // 强行切断所有动力
+      R3X_Set_Speed(MOTOR_FL, 0);
+      R3X_Set_Speed(MOTOR_RL, 0);
+      R3X_Set_Speed(MOTOR_FR, 0);
+      R3X_Set_Speed(MOTOR_RR, 0);
+      osDelay(10);
+      continue; // 直接跳过后续的 PID 算法和电机控制，陷入安全锁死循环
+    }
 
     // A：感知层 (获取轮速)
     speed_L = R3X_Get_Left_Speed();
