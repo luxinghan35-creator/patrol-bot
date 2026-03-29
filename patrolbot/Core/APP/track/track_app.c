@@ -21,8 +21,12 @@ void Track_App_Init(void) {
 }
 
 static uint8_t Read_Sensor_Array(void) {
-    // 请务必替换为你真实的 GPIO 读取代码，以下为占位
-    return 0;
+    // 【极性修正】：手册规定黑线为0，白地为1。
+    // 假设 8 个探头接在同一 GPIO 端口 (如 GPIOA 的 Pin0~Pin7)
+    // 使用按位取反(~)，强行将底层的 黑=0/白=1 翻转为逻辑层需要的 黑=1/白=0
+    uint8_t raw_data = (uint8_t)(GPIOA->IDR & 0x00FF);
+
+    return (uint8_t)(~raw_data & 0x00FF);
 }
 
 void Track_App_TaskLoop(void) {
