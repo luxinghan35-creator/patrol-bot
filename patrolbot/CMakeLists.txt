@@ -50,6 +50,8 @@ add_executable(${CMAKE_PROJECT_NAME}
         Core/APP/chassis/chassis_app.c
         Core/APP/monitor/monitor_app.h
         Core/APP/monitor/monitor_app.c
+        Core/APP/track/track_app.h
+        Core/APP/track/track_app.c
 )
 
 # Add STM32CubeMX generated sources
@@ -96,6 +98,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
         Core/APP/chassis
         Core/APP/monitor
         Core/APP
+        Core/APP/track
 )
 
 # Add project symbols (macros)
