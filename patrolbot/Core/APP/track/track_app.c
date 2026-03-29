@@ -1,32 +1,54 @@
 //
 // Created by luxin on 2026/3/29.
 //
+/**
+ * @file    track_app.c
+ * @brief   R3X 外环循迹状态机实现 (纯正 I2C 总线版本)
+ */
+
 #include "track_app.h"
-#include "gpio.h"
+#include "i2c_bus.h"     // 引入你手搓的防死锁底层
 #include "chassis_app.h"
+#include "cmsis_os.h"
 #include "motor_driver.h"
 
-/** @brief 外环航向牵引速率 (注意：因为改成了累加制，这个值必须调小，否则转弯会极快) */
+// 【硬件地址】不插跳线帽为 0x4C，左移 1 位得 0x98。
+// 如果你插了双跳线帽，请改为 0x9E！(不确定请告诉我你板子上的跳线情况)
+#define GRAY_SENSOR_ADDR 0x98
+
 static float Kp_outer = 0.5f;
-
-/** @brief 记忆最后一次有效偏差 */
 static float last_valid_error = 0.0f;
-
-/** @brief 状态机标志位：去掉了 static！允许 chassis_app.c 跨文件调用拦截 */
 uint8_t is_lost_line = 0;
 
 void Track_App_Init(void) {
     last_valid_error = 0.0f;
     is_lost_line = 0;
+
+    // 【最高规格防护】网络诊断 (Ping) 同步
+    // 强制挂起等待传感器初始化完成，防止一上电 I2C 扑空死锁
+    uint8_t ping_val = 0;
+    while (ping_val != 0x66) {
+        // 命令 0xAA，期望返回 0x66 (手册 7.13)
+        R3X_I2C_Read_Reg(GRAY_SENSOR_ADDR, 0xAA, &ping_val, 1);
+        osDelay(10); // OS 级挂起，交出 CPU 等待传感器就绪
+    }
 }
 
 static uint8_t Read_Sensor_Array(void) {
-    // 【极性修正】：手册规定黑线为0，白地为1。
-    // 假设 8 个探头接在同一 GPIO 端口 (如 GPIOA 的 Pin0~Pin7)
-    // 使用按位取反(~)，强行将底层的 黑=0/白=1 翻转为逻辑层需要的 黑=1/白=0
-    uint8_t raw_data = (uint8_t)(GPIOA->IDR & 0x00FF);
+    uint8_t raw_data = 0;
 
-    return (uint8_t)(~raw_data & 0x00FF);
+    // 【硬件直读】使用命令 0xDD 读取 8 路数字量 (手册 7.7)
+    if (R3X_I2C_Read_Reg(GRAY_SENSOR_ADDR, 0xDD, &raw_data, 1) == 0) {
+        // 【极性反转】手册明确白场=1，黑场=0。
+        // 取反后屏蔽高位，完美适配黑线=1 的状态机算法
+        return (uint8_t)(~raw_data & 0x00FF);
+    }
+
+    // 【I2C 断线自愈降级】
+    // 走到这里说明底层的 i2c_bus.c 已经触发了总线重启。
+    // 返回 0x55 这个绝对不可能匹配黑线特征的脏数据，
+    // 它会触发下面的 default 维持原状，而绝不会误触发全 0 的盲打自旋状态机！
+    return 0x55;
 }
 
 void Track_App_TaskLoop(void) {
@@ -34,7 +56,7 @@ void Track_App_TaskLoop(void) {
     float current_error = 0.0f;
     uint8_t valid_read = 1;
 
-    // 1. 特征字典解析
+    // 特征字典解析
     switch (sensor_val) {
         case 0b00011000: current_error = 0.0f;  break;
         case 0b00110000: current_error = -1.0f; break;
@@ -48,22 +70,18 @@ void Track_App_TaskLoop(void) {
         case 0b00000000:
             valid_read = 0;
             break;
-        default:
+        default: // 处理 0x55 (I2C 错误) 或异常噪点
             current_error = last_valid_error;
             break;
     }
 
     if (valid_read) {
-        // --- 正常巡线状态 ---
         is_lost_line = 0;
         last_valid_error = current_error;
-
         extern volatile float target_yaw;
 
-        // 【核心修复】：以积分形式牵引目标航向，绝不破坏内环的绝对抗扰动能力！
         target_yaw += (current_error * Kp_outer);
 
-        // 航向角越界保护 (防止长时间跑圈导致 float 失去精度)
         if (target_yaw > 180.0f) {
             target_yaw -= 360.0f;
         } else if (target_yaw < -180.0f) {
@@ -71,7 +89,6 @@ void Track_App_TaskLoop(void) {
         }
 
     } else {
-        // --- 彻底丢线，触发记忆强控 ---
         is_lost_line = 1;
         if (last_valid_error <= -3.0f) {
             R3X_Drive_Tank(-200, 200);
