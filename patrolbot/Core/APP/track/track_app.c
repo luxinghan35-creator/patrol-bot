@@ -16,21 +16,33 @@
 // 如果你插了双跳线帽，请改为 0x9E！(不确定请告诉我你板子上的跳线情况)
 #define GRAY_SENSOR_ADDR 0x98
 
-static float Kp_outer = 0.5f;
-static float last_valid_error = 0.0f;
+static float Kp_outer = -0.5f;
+float last_valid_error = 0.0f;
 uint8_t is_lost_line = 0;
 
 void Track_App_Init(void) {
     last_valid_error = 0.0f;
     is_lost_line = 0;
 
-    // 【最高规格防护】网络诊断 (Ping) 同步
-    // 强制挂起等待传感器初始化完成，防止一上电 I2C 扑空死锁
+    // 【最高规格防护】网络诊断 (Ping) 同步 - 工业级重构版
     uint8_t ping_val = 0;
-    while (ping_val != 0x66) {
-        // 命令 0xAA，期望返回 0x66 (手册 7.13)
+    uint8_t retry_count = 0;
+
+    // 1. 【物理时序让步】强制休眠 500ms，给灰度传感器内部 MCU 充足的开机时间！
+    osDelay(500);
+
+    // 2. 【防死锁轮询】最多只试 10 次，绝不无限期死等
+    while (ping_val != 0x66 && retry_count < 10) {
         R3X_I2C_Read_Reg(GRAY_SENSOR_ADDR, 0xAA, &ping_val, 1);
-        osDelay(10); // OS 级挂起，交出 CPU 等待传感器就绪
+        retry_count++;
+        osDelay(20); // 每次失败等 20ms 再试
+    }
+
+    // 3. 【系统级熔断隔离】
+    if (ping_val != 0x66) {
+        // 走到这里说明灰度传感器彻底死了（断线或坏了）
+        // 但我们绝不卡死系统！强行放行，让 OLED 和测温继续工作。
+        // 外环任务会在 TaskLoop 里因为读不到数据自动触发 is_lost_line 原地自旋保护。
     }
 }
 
@@ -90,10 +102,6 @@ void Track_App_TaskLoop(void) {
 
     } else {
         is_lost_line = 1;
-        if (last_valid_error <= -3.0f) {
-            R3X_Drive_Tank(-200, 200);
-        } else if (last_valid_error >= 3.0f) {
-            R3X_Drive_Tank(200, -200);
-        }
+
     }
 }

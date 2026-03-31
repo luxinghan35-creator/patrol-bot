@@ -38,6 +38,7 @@
 #include "oled.h"
 #include "monitor_app.h"
 #include "chassis_app.h"
+#include "track_app.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -150,11 +151,13 @@ void StartDefaultTask(void *argument)
 
   // 1. 初始化 OLED (屏幕点亮)
   OLED_Init();
+   //初始化灰度传感器
+  Track_App_Init();
   /* Infinite loop */
   for(;;)
   {
     Monitor_App_TaskLoop();
-
+    Track_App_TaskLoop();   // <--- 新增：采集灰度数据，并修改全局的 target_yaw 与 is_lost_line
     osDelay(100);
   }
   /* USER CODE END StartDefaultTask */
