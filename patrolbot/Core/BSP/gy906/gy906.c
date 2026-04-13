@@ -12,10 +12,10 @@
  * @retval  float 当前真实温度值(℃) 或 硬件错误码(-999.0f)
  */
 float R3X_GY906_Read_ObjTemp(void) {
-    uint8_t data[3]; // 接收 LSB, MSB, 和 PEC校验位
+    uint8_t data[2]; // 接收 LSB, MSB, 和 PEC校验位
 
     // 调用我们写的带有超时自愈功能的底层接口
-    if (R3X_I2C_Read_Reg(GY906_ADDR, REG_OBJ_TEMP, data, 3) == 0) {
+    if (R3X_I2C_Read_Reg(GY906_ADDR, REG_OBJ_TEMP, data, 2) == 0) {
         // 数据拼接
         uint16_t raw_temp = (data[1] << 8) | data[0];
         // GY-906 (MLX90614) 的官方温度换算公式

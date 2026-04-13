@@ -5,7 +5,7 @@
 #include "i2c_bus.h"
 #include "i2c.h" // 引用你的 hi2c1
 
-#define I2C_TIMEOUT 10 // 极限超时时间 10ms，绝不允许死等占用 CPU
+#define I2C_TIMEOUT 50 // 极限超时时间 10ms，绝不允许死等占用 CPU
 
 /**
  * @brief   自愈复位机制实现

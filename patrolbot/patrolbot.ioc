@@ -2,8 +2,7 @@
 CAD.formats=
 CAD.pinconfig=
 CAD.provider=
-FREERTOS.FootprintOK=true
-FREERTOS.IPParameters=Tasks01,configTOTAL_HEAP_SIZE,FootprintOK
+FREERTOS.IPParameters=Tasks01,configTOTAL_HEAP_SIZE
 FREERTOS.Tasks01=defaultTask,24,128,StartDefaultTask,Default,NULL,Dynamic,NULL,NULL;MotionTask,48,128,StartMotionTask,Default,NULL,Dynamic,NULL,NULL
 FREERTOS.configTOTAL_HEAP_SIZE=10240
 File.Version=6

@@ -7,7 +7,7 @@
  */
 
 #include "track_app.h"
-#include "i2c_bus.h"     // 引入你手搓的防死锁底层
+#include "i2c_bus.h"
 #include "chassis_app.h"
 #include "cmsis_os.h"
 #include "motor_driver.h"
@@ -68,29 +68,62 @@ void Track_App_TaskLoop(void) {
     float current_error = 0.0f;
     uint8_t valid_read = 1;
 
-    // 特征字典解析
-    switch (sensor_val) {
-        case 0b00011000: current_error = 0.0f;  break;
-        case 0b00110000: current_error = -1.0f; break;
-        case 0b00001100: current_error = 1.0f;  break;
-        case 0b01100000: current_error = -2.0f; break;
-        case 0b00000110: current_error = 2.0f;  break;
-        case 0b11000000: current_error = -3.5f; break;
-        case 0b10000000: current_error = -4.0f; break;
-        case 0b00000011: current_error = 3.5f;  break;
-        case 0b00000001: current_error = 4.0f;  break;
-        case 0b00000000:
-            valid_read = 0;
-            break;
-        default: // 处理 0x55 (I2C 错误) 或异常噪点
-            current_error = last_valid_error;
-            break;
+    // 特征字典解析 - 工业级掩码模糊匹配与强控升级版
+    if (sensor_val == 0b00000000) {
+        valid_read = 0; // 全白，彻底丢线，交给 Chassis_App 暴力自旋
+    }
+    // 1. 【十字路口过滤】(大面积全黑) - 必须放在最前
+    // 直接把误差归零，硬扛着冲过去，绝不乱扭
+    else if ((sensor_val & 0b01111110) == 0b01111110) {
+        current_error = 0.0f;
+    }
+    // 2. 【强控拦截】左直角弯 / 锐角弯 (左侧压满厚重黑线)
+    // 掩码 11100000，只要左边三个亮了俩及以上，直接判定极速左转
+    else if ((sensor_val & 0b11100000) == 0b11100000 || (sensor_val & 0b11000000) == 0b11000000) {
+        current_error = -6.0f; // 给出一个巨大误差
+
+        // 瞬间越权夺取电机底层控制权，用极限扭矩撕开静摩擦力
+        R3X_Set_Speed(MOTOR_FL, -400); // 左前轮暴力倒车 (加大到-400)
+        R3X_Set_Speed(MOTOR_RL, -400); // 左后轮暴力倒车
+        R3X_Set_Speed(MOTOR_FR, 700);  // 右前轮暴力加力 (加大到700)
+        R3X_Set_Speed(MOTOR_RR, 700);  // 右后轮暴力加力
+        osDelay(30); // 缩短维持时间到 30ms，防止甩头过猛
+    }
+    // 3. 【强控拦截】右直角弯 / 锐角弯 (右侧压满厚重黑线)
+    else if ((sensor_val & 0b00000111) == 0b00000111 || (sensor_val & 0b00000011) == 0b00000011) {
+        current_error = 6.0f;
+
+        R3X_Set_Speed(MOTOR_FL, 700);  // 左侧满血加力
+        R3X_Set_Speed(MOTOR_RL, 700);
+        R3X_Set_Speed(MOTOR_FR, -400); // 右侧暴力倒车
+        R3X_Set_Speed(MOTOR_RR, -400);
+        osDelay(30);
+    }
+    // 4. 【常规微调】兼容你原有的平滑巡航逻辑
+    else if (sensor_val == 0b10000000) current_error = -4.0f;
+    else if (sensor_val == 0b01100000) current_error = -2.0f;
+    else if (sensor_val == 0b00110000) current_error = -1.0f;
+    else if (sensor_val == 0b00011000) current_error = 0.0f;
+    else if (sensor_val == 0b00001100) current_error = 1.0f;
+    else if (sensor_val == 0b00000110) current_error = 2.0f;
+    else if (sensor_val == 0b00000001) current_error = 4.0f;
+    else {
+        // 杂波降级：什么都没匹配上，维持上一帧判断
+        current_error = last_valid_error;
     }
 
     if (valid_read) {
+        extern volatile float target_yaw;
+        extern volatile float current_yaw; // 【关键】必须引入底层真实航向
+
+        // 【核心救命补丁：斩断 PID 积分报复】
+        // 如果上一帧正在丢线暴力自旋，这一帧刚踩回线
+        if (is_lost_line == 1) {
+            target_yaw = current_yaw; // 瞬间把目标重置为当前物理航向，清空历史旧账！
+        }
+
         is_lost_line = 0;
         last_valid_error = current_error;
-        extern volatile float target_yaw;
 
         target_yaw += (current_error * Kp_outer);
 
@@ -102,6 +135,5 @@ void Track_App_TaskLoop(void) {
 
     } else {
         is_lost_line = 1;
-
     }
 }

@@ -13,7 +13,7 @@
  * @note  【核心架构】必须为 static 全局静态持久化变量，严禁放在循环内部，防止积分(I)与微分(D)状态在每次循环中被重置丢失。
  */
 static PID_Controller yaw_pid;
-static int base_pwm = 450; //基础占空比
+static int base_pwm = 250; //基础占空比
 static int rear_offset = 30; //后轮相对于前轮的速度补偿，防止打滑
 
 /**
