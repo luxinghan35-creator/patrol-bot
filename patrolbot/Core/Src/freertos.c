@@ -158,7 +158,7 @@ void StartDefaultTask(void *argument)
   {
     Monitor_App_TaskLoop();
     Track_App_TaskLoop();   // <--- 新增：采集灰度数据，并修改全局的 target_yaw 与 is_lost_line
-    osDelay(100);
+    osDelay(20);
   }
   /* USER CODE END StartDefaultTask */
 }

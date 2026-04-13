@@ -7,10 +7,12 @@
  */
 
 #include "track_app.h"
-#include "i2c_bus.h"     // 引入你手搓的防死锁底层
+#include "i2c_bus.h"
 #include "chassis_app.h"
 #include "cmsis_os.h"
 #include "motor_driver.h"
+
+extern osThreadId_t MotionTaskHandle; // 引入内环任务句柄
 
 // 【硬件地址】不插跳线帽为 0x4C，左移 1 位得 0x98。
 // 如果你插了双跳线帽，请改为 0x9E！(不确定请告诉我你板子上的跳线情况)
@@ -68,32 +70,94 @@ void Track_App_TaskLoop(void) {
     float current_error = 0.0f;
     uint8_t valid_read = 1;
 
-    // 特征字典解析
-    switch (sensor_val) {
-        case 0b00011000: current_error = 0.0f;  break;
-        case 0b00110000: current_error = -1.0f; break;
-        case 0b00001100: current_error = 1.0f;  break;
-        case 0b01100000: current_error = -2.0f; break;
-        case 0b00000110: current_error = 2.0f;  break;
-        case 0b11000000: current_error = -3.5f; break;
-        case 0b10000000: current_error = -4.0f; break;
-        case 0b00000011: current_error = 3.5f;  break;
-        case 0b00000001: current_error = 4.0f;  break;
-        case 0b00000000:
-            valid_read = 0;
-            break;
-        default: // 处理 0x55 (I2C 错误) 或异常噪点
-            current_error = last_valid_error;
-            break;
+    // 特征字典解析 - 工业级掩码模糊匹配与强控升级版
+    if (sensor_val == 0b00000000) {
+        valid_read = 0; // 全白，彻底丢线，交给 Chassis_App 暴力自旋
+    }
+    // 1. 【十字路口过滤】(大面积全黑) - 必须放在最前
+    // 直接把误差归零，硬扛着冲过去，绝不乱扭
+    else if ((sensor_val & 0b01111110) == 0b01111110) {
+        current_error = 0.0f;
+    }
+    // 2. 【强控拦截】左直角弯 / 锐角弯
+    else if ((sensor_val & 0b11100000) == 0b11100000 || (sensor_val & 0b11000000) == 0b11000000) {
+        current_error = -6.0f;
+
+        // 【核心补丁：系统级越权】强行挂起内环 PID 任务，剥夺其路权！
+        osThreadSuspend(MotionTaskHandle);
+
+        R3X_Set_Speed(MOTOR_FL, -400);
+        R3X_Set_Speed(MOTOR_RL, -400);
+        R3X_Set_Speed(MOTOR_FR, 700);
+        R3X_Set_Speed(MOTOR_RR, 700);
+        osDelay(30);
+
+        // 砸过弯后，重新激活内环 PID 任务
+        osThreadResume(MotionTaskHandle);
+    }
+    // 3. 【强控拦截】右直角弯 / 锐角弯
+    else if ((sensor_val & 0b00000111) == 0b00000111 || (sensor_val & 0b00000011) == 0b00000011) {
+        current_error = 6.0f;
+
+        // 【核心补丁：系统级越权】
+        osThreadSuspend(MotionTaskHandle);
+
+        R3X_Set_Speed(MOTOR_FL, 700);
+        R3X_Set_Speed(MOTOR_RL, 700);
+        R3X_Set_Speed(MOTOR_FR, -400);
+        R3X_Set_Speed(MOTOR_RR, -400);
+        osDelay(30);
+
+        osThreadResume(MotionTaskHandle);
+    }
+    // 4. 【常规微调】兼容你原有的平滑巡航逻辑
+    else if (sensor_val == 0b10000000) current_error = -4.0f;
+    else if (sensor_val == 0b01100000) current_error = -2.0f;
+    else if (sensor_val == 0b00110000) current_error = -1.0f;
+    else if (sensor_val == 0b00011000) current_error = 0.0f;
+    else if (sensor_val == 0b00001100) current_error = 1.0f;
+    else if (sensor_val == 0b00000110) current_error = 2.0f;
+    else if (sensor_val == 0b00000001) current_error = 4.0f;
+    else {
+        // 杂波降级：什么都没匹配上，维持上一帧判断
+        current_error = last_valid_error;
     }
 
     if (valid_read) {
+        extern volatile float target_yaw;
+        extern volatile float current_yaw;
+        extern osThreadId_t MotionTaskHandle; // 引入内环 PID 任务句柄
+
+        // 【物理级大手术 1：斩断“旋转动能锁死”】
+        if (is_lost_line == 1) {
+            // 此时刚刚从丢线盲打自旋中捕获到黑线！
+            // 必须瞬间剥夺内环路权，防止它下发直行指令导致打滑！
+            osThreadSuspend(MotionTaskHandle);
+
+            // 极限电子刹车：全轮灌零，利用减速箱齿轮阻力强行绞杀旋转动能
+            R3X_Set_Speed(MOTOR_FL, 0);
+            R3X_Set_Speed(MOTOR_RL, 0);
+            R3X_Set_Speed(MOTOR_FR, 0);
+            R3X_Set_Speed(MOTOR_RR, 0);
+            osDelay(80); // 死锁 80ms，硬生生把几公斤的车头按稳在黑线上！
+
+            // 车体动能清零后，再把目标对齐当前物理航向，完成真正的无扰切换
+            target_yaw = current_yaw;
+            is_lost_line = 0; // 提前清零状态
+
+            osThreadResume(MotionTaskHandle); // 重新放行内环
+        }
+
         is_lost_line = 0;
         last_valid_error = current_error;
-        extern volatile float target_yaw;
 
-        target_yaw += (current_error * Kp_outer);
+        // 【物理级大手术 2：拔除直线跑偏的“积分炸弹”】
+        // 彻底抛弃 target_yaw += ... 的积分风转写法！
+        // 改为基于当前真实物理姿态的“绝对偏移随动”：
+        float yaw_offset = current_error * Kp_outer;
+        target_yaw = current_yaw + yaw_offset;
 
+        // 偏航角越界归一化 (-180 到 180 物理环绕)
         if (target_yaw > 180.0f) {
             target_yaw -= 360.0f;
         } else if (target_yaw < -180.0f) {
@@ -101,7 +165,6 @@ void Track_App_TaskLoop(void) {
         }
 
     } else {
-        is_lost_line = 1;
-
+        is_lost_line = 1; // 彻底丢线，交给 Chassis_App 执行原地盲打自旋
     }
 }
