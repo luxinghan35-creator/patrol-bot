@@ -70,45 +70,64 @@ void Track_App_TaskLoop(void) {
     float current_error = 0.0f;
     uint8_t valid_read = 1;
 
-    // 特征字典解析 - 工业级掩码模糊匹配与强控升级版
+    // 特征字典解析
     if (sensor_val == 0b00000000) {
-        valid_read = 0; // 全白丢线
+        valid_read = 0;
     }
-    // 1. 【十字路口过滤】直接误差归零硬冲
     else if ((sensor_val & 0b01111110) == 0b01111110) {
         current_error = 0.0f;
     }
-    // 2. 【强控拦截】左直角弯 / 锐角弯
+   // 2. 【强控拦截】左直角弯 / 锐角弯
     else if ((sensor_val & 0b11100000) == 0b11100000 || (sensor_val & 0b11000000) == 0b11000000) {
         current_error = -6.0f;
-
-        // 【核心点穴】物理封锁你截图里的那个 10ms 刷新任务！
         osThreadSuspend(MotionTaskHandle);
 
-        // 扭矩拉满到 700/-400
-        R3X_Set_Speed(MOTOR_FL, -400);
-        R3X_Set_Speed(MOTOR_RL, -400);
-        R3X_Set_Speed(MOTOR_FR, 700);
-        R3X_Set_Speed(MOTOR_RR, 700);
-        osDelay(30);
+        // 【入弯刹车】强行抹除直线动能
+        R3X_Set_Speed(MOTOR_FL, 0); R3X_Set_Speed(MOTOR_RL, 0);
+        R3X_Set_Speed(MOTOR_FR, 0); R3X_Set_Speed(MOTOR_RR, 0);
+        osDelay(40);
 
-        // 【交还路权】
+        // 【左侧暴力甩尾】左倒右正
+        while ((sensor_val & 0b11100000) == 0b11100000 || (sensor_val & 0b11000000) == 0b11000000) {
+            R3X_Set_Speed(MOTOR_FL, -400); R3X_Set_Speed(MOTOR_RL, -400);
+            R3X_Set_Speed(MOTOR_FR, 700);  R3X_Set_Speed(MOTOR_RR, 700);
+            osDelay(10);
+            sensor_val = Read_Sensor_Array();
+        }
+
+        // 【出弯刹车】强行按平旋转动能
+        R3X_Set_Speed(MOTOR_FL, 0); R3X_Set_Speed(MOTOR_RL, 0);
+        R3X_Set_Speed(MOTOR_FR, 0); R3X_Set_Speed(MOTOR_RR, 0);
+        osDelay(40);
+
+        if (sensor_val == 0b00000000) valid_read = 0;
         osThreadResume(MotionTaskHandle);
     }
-    // 3. 【强控拦截】右直角弯 / 锐角弯
+
+    // 3. 【强控拦截】右直角弯 / 锐角弯 (对称补充完毕)
     else if ((sensor_val & 0b00000111) == 0b00000111 || (sensor_val & 0b00000011) == 0b00000011) {
         current_error = 6.0f;
-
-        // 【核心点穴】
         osThreadSuspend(MotionTaskHandle);
 
-        R3X_Set_Speed(MOTOR_FL, 700);
-        R3X_Set_Speed(MOTOR_RL, 700);
-        R3X_Set_Speed(MOTOR_FR, -400);
-        R3X_Set_Speed(MOTOR_RR, -400);
-        osDelay(30);
+        // 【入弯刹车】强行抹除直线动能
+        R3X_Set_Speed(MOTOR_FL, 0); R3X_Set_Speed(MOTOR_RL, 0);
+        R3X_Set_Speed(MOTOR_FR, 0); R3X_Set_Speed(MOTOR_RR, 0);
+        osDelay(40);
 
-        // 【交还路权】
+        // 【右侧暴力甩尾】左正右倒（与左转完全相反的极性）
+        while ((sensor_val & 0b00000111) == 0b00000111 || (sensor_val & 0b00000011) == 0b00000011) {
+            R3X_Set_Speed(MOTOR_FL, 700);  R3X_Set_Speed(MOTOR_RL, 700);
+            R3X_Set_Speed(MOTOR_FR, -400); R3X_Set_Speed(MOTOR_RR, -400);
+            osDelay(10);
+            sensor_val = Read_Sensor_Array();
+        }
+
+        // 【出弯刹车】强行按平旋转动能
+        R3X_Set_Speed(MOTOR_FL, 0); R3X_Set_Speed(MOTOR_RL, 0);
+        R3X_Set_Speed(MOTOR_FR, 0); R3X_Set_Speed(MOTOR_RR, 0);
+        osDelay(40);
+
+        if (sensor_val == 0b00000000) valid_read = 0;
         osThreadResume(MotionTaskHandle);
     }
     // 4. 【常规微调】兼容平滑巡航
@@ -124,14 +143,13 @@ void Track_App_TaskLoop(void) {
     }
 
     // ==========================================
-    // 姿态分发与状态机同步 (根除打滑与疯转)
+    // 姿态分发与状态机同步
     // ==========================================
     if (valid_read) {
         extern volatile float target_yaw;
         extern volatile float current_yaw;
 
         if (is_lost_line == 1) {
-            // 【极限电子刹车】挂起底盘，全轮灌零，绞杀旋转动能
             osThreadSuspend(MotionTaskHandle);
             R3X_Set_Speed(MOTOR_FL, 0);
             R3X_Set_Speed(MOTOR_RL, 0);
@@ -139,7 +157,6 @@ void Track_App_TaskLoop(void) {
             R3X_Set_Speed(MOTOR_RR, 0);
             osDelay(80);
 
-            // 【拔除积分炸弹】目标对齐真实航向
             target_yaw = current_yaw;
             is_lost_line = 0;
             osThreadResume(MotionTaskHandle);
@@ -148,7 +165,6 @@ void Track_App_TaskLoop(void) {
         is_lost_line = 0;
         last_valid_error = current_error;
 
-        // 绝对偏移随动，禁止使用 +=
         target_yaw = current_yaw + (current_error * Kp_outer);
 
         if (target_yaw > 180.0f) target_yaw -= 360.0f;
