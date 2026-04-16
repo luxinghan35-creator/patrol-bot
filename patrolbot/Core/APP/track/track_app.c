@@ -12,57 +12,33 @@
 #include "cmsis_os.h"
 #include "motor_driver.h"
 
-extern osThreadId_t MotionTaskHandle; // 引入内环任务句柄
-
-// 【硬件地址】不插跳线帽为 0x4C，左移 1 位得 0x98。
-// 如果你插了双跳线帽，请改为 0x9E！(不确定请告诉我你板子上的跳线情况)
+// 硬件地址
 #define GRAY_SENSOR_ADDR 0x98
+
+static uint8_t Read_Sensor_Array(void) {
+    uint8_t raw_data = 0;
+
+    // 1. 从寄存器 0xDD (根据你的芯片手册而定) 读取 1 字节状态
+    if (R3X_I2C_Read_Reg(GRAY_SENSOR_ADDR, 0xDD, &raw_data, 1) == 0) {
+
+        // 2. 读取成功：按位取反，确保 1=黑线，0=白底，并屏蔽多余的高位
+        return (uint8_t)(~raw_data & 0x00FF);
+    }
+
+    // 3. 读取失败(断线/死机)：返回安全脏数据，防止上层状态机失控疯跑
+    return 0x55;
+}
 
 static float Kp_outer = -0.5f;
 float last_valid_error = 0.0f;
 uint8_t is_lost_line = 0;
 
+extern osThreadId_t MotionTaskHandle; // 引入内环任务句柄，用于夺权
+
 void Track_App_Init(void) {
     last_valid_error = 0.0f;
     is_lost_line = 0;
-
-    // 【最高规格防护】网络诊断 (Ping) 同步 - 工业级重构版
-    uint8_t ping_val = 0;
-    uint8_t retry_count = 0;
-
-    // 1. 【物理时序让步】强制休眠 500ms，给灰度传感器内部 MCU 充足的开机时间！
-    osDelay(500);
-
-    // 2. 【防死锁轮询】最多只试 10 次，绝不无限期死等
-    while (ping_val != 0x66 && retry_count < 10) {
-        R3X_I2C_Read_Reg(GRAY_SENSOR_ADDR, 0xAA, &ping_val, 1);
-        retry_count++;
-        osDelay(20); // 每次失败等 20ms 再试
-    }
-
-    // 3. 【系统级熔断隔离】
-    if (ping_val != 0x66) {
-        // 走到这里说明灰度传感器彻底死了（断线或坏了）
-        // 但我们绝不卡死系统！强行放行，让 OLED 和测温继续工作。
-        // 外环任务会在 TaskLoop 里因为读不到数据自动触发 is_lost_line 原地自旋保护。
-    }
-}
-
-static uint8_t Read_Sensor_Array(void) {
-    uint8_t raw_data = 0;
-
-    // 【硬件直读】使用命令 0xDD 读取 8 路数字量 (手册 7.7)
-    if (R3X_I2C_Read_Reg(GRAY_SENSOR_ADDR, 0xDD, &raw_data, 1) == 0) {
-        // 【极性反转】手册明确白场=1，黑场=0。
-        // 取反后屏蔽高位，完美适配黑线=1 的状态机算法
-        return (uint8_t)(~raw_data & 0x00FF);
-    }
-
-    // 【I2C 断线自愈降级】
-    // 走到这里说明底层的 i2c_bus.c 已经触发了总线重启。
-    // 返回 0x55 这个绝对不可能匹配黑线特征的脏数据，
-    // 它会触发下面的 default 维持原状，而绝不会误触发全 0 的盲打自旋状态机！
-    return 0x55;
+    osDelay(500); // 传感器上电稳定时间
 }
 
 void Track_App_TaskLoop(void) {
@@ -72,78 +48,110 @@ void Track_App_TaskLoop(void) {
 
     // 特征字典解析
     if (sensor_val == 0b00000000) {
-        valid_read = 0;
+        valid_read = 0; // 全白丢线
     }
     else if ((sensor_val & 0b01111110) == 0b01111110) {
-        current_error = 0.0f;
+        current_error = 0.0f; // 十字路口硬冲
     }
-   // 2. 【强控拦截】左直角弯 / 锐角弯
+    // 2. 【强控拦截】左直角弯 / 锐角弯
     else if ((sensor_val & 0b11100000) == 0b11100000 || (sensor_val & 0b11000000) == 0b11000000) {
-        current_error = -6.0f;
+        current_error = 0.0f; // 强控期切断外环累加
         osThreadSuspend(MotionTaskHandle);
 
-        // 【入弯刹车】强行抹除直线动能
+        // 【入弯主动反接制动】绞杀前冲直线动能
+        R3X_Set_Speed(MOTOR_FL, -400); R3X_Set_Speed(MOTOR_RL, -400);
+        R3X_Set_Speed(MOTOR_FR, -400); R3X_Set_Speed(MOTOR_RR, -400);
+        osDelay(30);
         R3X_Set_Speed(MOTOR_FL, 0); R3X_Set_Speed(MOTOR_RL, 0);
         R3X_Set_Speed(MOTOR_FR, 0); R3X_Set_Speed(MOTOR_RR, 0);
-        osDelay(40);
+        osDelay(20);
 
-        // 【左侧暴力甩尾】左倒右正
-        while ((sensor_val & 0b11100000) == 0b11100000 || (sensor_val & 0b11000000) == 0b11000000) {
+        // 【第一段：盲转逃逸】强行离开直角顶点
+        R3X_Set_Speed(MOTOR_FL, -400); R3X_Set_Speed(MOTOR_RL, -400);
+        R3X_Set_Speed(MOTOR_FR, 700);  R3X_Set_Speed(MOTOR_RR, 700);
+        osDelay(100);
+
+        // 【第二段：中心死区捕获】死等 4、5 号探头归位
+        sensor_val = Read_Sensor_Array();
+        while ((sensor_val & 0b00011000) == 0) {
             R3X_Set_Speed(MOTOR_FL, -400); R3X_Set_Speed(MOTOR_RL, -400);
             R3X_Set_Speed(MOTOR_FR, 700);  R3X_Set_Speed(MOTOR_RR, 700);
             osDelay(10);
             sensor_val = Read_Sensor_Array();
         }
 
-        // 【出弯刹车】强行按平旋转动能
+        // 【出弯抱死防甩】按平旋转动能
         R3X_Set_Speed(MOTOR_FL, 0); R3X_Set_Speed(MOTOR_RL, 0);
         R3X_Set_Speed(MOTOR_FR, 0); R3X_Set_Speed(MOTOR_RR, 0);
         osDelay(40);
 
-        if (sensor_val == 0b00000000) valid_read = 0;
+        // 【物理航向重置】防止旧账导致 PID 报复性疯转
+        extern volatile float target_yaw;
+        extern volatile float current_yaw;
+        target_yaw = current_yaw;
+
         osThreadResume(MotionTaskHandle);
     }
-
-    // 3. 【强控拦截】右直角弯 / 锐角弯 (对称补充完毕)
+    // 3. 【强控拦截】右直角弯 / 锐角弯
     else if ((sensor_val & 0b00000111) == 0b00000111 || (sensor_val & 0b00000011) == 0b00000011) {
-        current_error = 6.0f;
+        current_error = 0.0f;
         osThreadSuspend(MotionTaskHandle);
 
-        // 【入弯刹车】强行抹除直线动能
+        // 【入弯主动反接制动】
+        R3X_Set_Speed(MOTOR_FL, -400); R3X_Set_Speed(MOTOR_RL, -400);
+        R3X_Set_Speed(MOTOR_FR, -400); R3X_Set_Speed(MOTOR_RR, -400);
+        osDelay(30);
         R3X_Set_Speed(MOTOR_FL, 0); R3X_Set_Speed(MOTOR_RL, 0);
         R3X_Set_Speed(MOTOR_FR, 0); R3X_Set_Speed(MOTOR_RR, 0);
-        osDelay(40);
+        osDelay(20);
 
-        // 【右侧暴力甩尾】左正右倒（与左转完全相反的极性）
-        while ((sensor_val & 0b00000111) == 0b00000111 || (sensor_val & 0b00000011) == 0b00000011) {
+        // 【第一段：盲转逃逸】
+        R3X_Set_Speed(MOTOR_FL, 700);  R3X_Set_Speed(MOTOR_RL, 700);
+        R3X_Set_Speed(MOTOR_FR, -400); R3X_Set_Speed(MOTOR_RR, -400);
+        osDelay(100);
+
+        // 【第二段：中心死区捕获】
+        sensor_val = Read_Sensor_Array();
+        while ((sensor_val & 0b00011000) == 0) {
             R3X_Set_Speed(MOTOR_FL, 700);  R3X_Set_Speed(MOTOR_RL, 700);
             R3X_Set_Speed(MOTOR_FR, -400); R3X_Set_Speed(MOTOR_RR, -400);
             osDelay(10);
             sensor_val = Read_Sensor_Array();
         }
 
-        // 【出弯刹车】强行按平旋转动能
+        // 【出弯抱死防甩】
         R3X_Set_Speed(MOTOR_FL, 0); R3X_Set_Speed(MOTOR_RL, 0);
         R3X_Set_Speed(MOTOR_FR, 0); R3X_Set_Speed(MOTOR_RR, 0);
         osDelay(40);
 
-        if (sensor_val == 0b00000000) valid_read = 0;
+        extern volatile float target_yaw;
+        extern volatile float current_yaw;
+        target_yaw = current_yaw;
+
         osThreadResume(MotionTaskHandle);
     }
-    // 4. 【常规微调】兼容平滑巡航
-    else if (sensor_val == 0b10000000) current_error = -4.0f;
-    else if (sensor_val == 0b01100000) current_error = -2.0f;
-    else if (sensor_val == 0b00110000) current_error = -1.0f;
-    else if (sensor_val == 0b00011000) current_error = 0.0f;
-    else if (sensor_val == 0b00001100) current_error = 1.0f;
-    else if (sensor_val == 0b00000110) current_error = 2.0f;
-    else if (sensor_val == 0b00000001) current_error = 4.0f;
+    // 4. 【动态加权质心纠错巡航】彻底消灭视觉死角
     else {
-        current_error = last_valid_error;
+        float weights[8] = {4.0f, 3.0f, 2.0f, 1.0f, -1.0f, -2.0f, -3.0f, -4.0f};
+        float sum = 0.0f;
+        int count = 0;
+
+        for (int i = 0; i < 8; i++) {
+            if (sensor_val & (1 << i)) {
+                sum += weights[i];
+                count++;
+            }
+        }
+
+        if (count > 0) {
+            current_error = sum / count;
+        } else {
+            current_error = last_valid_error;
+        }
     }
 
     // ==========================================
-    // 姿态分发与状态机同步
+    // 姿态分发与 IMU 串级同步
     // ==========================================
     if (valid_read) {
         extern volatile float target_yaw;
@@ -151,10 +159,10 @@ void Track_App_TaskLoop(void) {
 
         if (is_lost_line == 1) {
             osThreadSuspend(MotionTaskHandle);
-            R3X_Set_Speed(MOTOR_FL, 0);
-            R3X_Set_Speed(MOTOR_RL, 0);
-            R3X_Set_Speed(MOTOR_FR, 0);
-            R3X_Set_Speed(MOTOR_RR, 0);
+
+            // 刚扫到线时的高速自旋动能抱死
+            R3X_Set_Speed(MOTOR_FL, 0); R3X_Set_Speed(MOTOR_RL, 0);
+            R3X_Set_Speed(MOTOR_FR, 0); R3X_Set_Speed(MOTOR_RR, 0);
             osDelay(80);
 
             target_yaw = current_yaw;
@@ -165,8 +173,18 @@ void Track_App_TaskLoop(void) {
         is_lost_line = 0;
         last_valid_error = current_error;
 
-        target_yaw = current_yaw + (current_error * Kp_outer);
+        // 【激活串级】外环误差转化为持续偏航角累加
+        float yaw_step = current_error * Kp_outer;
+        target_yaw += yaw_step;
 
+        // 【抗积分风转锁】禁止目标角过度超前物理角度
+        if (target_yaw - current_yaw > 30.0f) {
+            target_yaw = current_yaw + 30.0f;
+        } else if (target_yaw - current_yaw < -30.0f) {
+            target_yaw = current_yaw - 30.0f;
+        }
+
+        // 环绕归一化
         if (target_yaw > 180.0f) target_yaw -= 360.0f;
         else if (target_yaw < -180.0f) target_yaw += 360.0f;
 
