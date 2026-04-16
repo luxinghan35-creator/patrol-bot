@@ -4,16 +4,19 @@
 
 #ifndef PATROLBOT_TRACK_APP_H
 #define PATROLBOT_TRACK_APP_H
+
 #include "main.h"
 
-/**
- * @brief 循迹外环初始化
- */
-void Track_App_Init(void);
+// 状态定义
+typedef enum {
+    TRACK_STATE_IDLE = 0,
+    TRACK_STATE_CRUISE,    // 常规加权巡航
+    TRACK_STATE_TURN_LEFT, // 强控左转
+    TRACK_STATE_TURN_RIGHT,// 强控右转
+    TRACK_STATE_LOST       // 丢线处理
+} TrackState_t;
 
-/**
- * @brief 循迹外环主业务逻辑 (必须在内环 PID 解算前调用)
- */
+void Track_App_Init(void);
 void Track_App_TaskLoop(void);
 
-#endif //PATROLBOT_TRACK_APP_H
+#endif
