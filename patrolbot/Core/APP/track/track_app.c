@@ -11,39 +11,90 @@
 #include "chassis_app.h"
 #include "cmsis_os.h"
 #include "motor_driver.h"
+#include "system_def.h" // 用于获取 current_yaw, target_yaw, system_alarm_flag
 
-// 硬件配置 (根据手册 7.6 / 7.7)
+// 硬件参数宏定义
 #define GW_GRAY_ADDR 0x98
 #define REG_DIGITAL  0xDD
 #define REG_PING     0xAA
 
-// 任务句柄（用于强控时点穴）
-extern osThreadId_t MotionTaskHandle;
-
-// 算法参数
-static float Kp_outer = -0.6f;     // 外环比例系数
-float last_valid_error = 0.0f;    // 历史残余误差
-uint8_t is_lost_line = 0;         // 丢线标志位
+// 动力参数宏定义（甩尾时的固定 PWM）
+#define PWM_TURN_FWD  400
+#define PWM_TURN_REV -300
+#define PWM_BRAKE     0
 
 // ==========================================================
-// 1. 底层数据接口 (遵循官方 Demo & 手册)
+// 外部接口 (Getter 通行证)
 // ==========================================================
-static uint8_t Fetch_Sensor_Raw(void) {
-    uint8_t data = 0;
-    // 官方 Demo 强调：先写 0xDD 再读。HAL_I2C_Mem_Read 封装了此过程
-    if (HAL_I2C_Mem_Read(&hi2c1, GW_GRAY_ADDR, REG_DIGITAL, I2C_MEMADD_SIZE_8BIT, &data, 1, 10) == HAL_OK) {
-        // 手册 2.4：白场=1，黑场=0。此处取反，使 1=黑线，0=白底
-        return (uint8_t)(~data);
-    }
-    return 0x55; // 通信失败返回杂波，靠惯性滑行
+void Track_App_Init(void);
+void Track_App_TaskLoop(void);
+uint8_t Track_Is_Turning(void);// 获取强控路权状态
+uint8_t Track_Is_Lost(void);    // 获取是否全白丢线
+float Track_Get_Error(void);    // 获取当前质心误差
+
+// 局部私有变量（绝对不加 extern）
+static float Kp_outer = -0.6f;
+static float last_valid_error = 0.0f;
+static uint8_t is_lost_line = 0;
+static volatile uint8_t track_is_turning = 0;
+
+uint8_t  Track_Is_Turning(void)
+{
+    return track_is_turning;
+}
+
+uint8_t Track_Is_Lost(void) {
+    return is_lost_line;
+}
+
+float Track_Get_Error(void) {
+    return last_valid_error;
 }
 
 // ==========================================================
-// 2. 加权质心纠错算法 (重构同仁 xunji.c 的核心)
+// 底层防线：带单边调度锁、避让机制与视觉缓存的 I2C 读取
+// ==========================================================
+static uint8_t Fetch_Sensor_Raw(void) {
+    static uint8_t last_sensor_data = SENSOR_CENTER_LOCK;
+    static uint16_t i2c_error_count = 0;
+
+    uint8_t data = 0;
+    uint8_t retry = 0;
+    HAL_StatusTypeDef res;
+
+    // 单边防御策略：因为我们没动测温代码，所以冲突极有可能发生。
+    do {
+        vTaskSuspendAll(); // 关门：尝试独占总线
+        res = HAL_I2C_Mem_Read(&hi2c1, GW_GRAY_ADDR, REG_DIGITAL, I2C_MEMADD_SIZE_8BIT, &data, 1, 10);
+        xTaskResumeAll();  // 开门：读完立刻释放调度器
+
+        if (res != HAL_OK) {
+            // 如果撞车了，绝对不能死锁！主动延时 1ms，把 CPU 让给测温任务去完成读取
+            osDelay(1);
+            retry++;
+        }
+    } while (res != HAL_OK && retry < 3);
+
+    // 状态更新与熔断机制
+    if (res == HAL_OK) {
+        last_sensor_data = (uint8_t)(~data);
+        i2c_error_count = 0; // 成功则清零错误池
+    } else {
+        i2c_error_count++;
+        // 如果连续 I2C_ERROR_THRESHOLD (比如10次) 彻底读不到，说明硬件断线
+        // 强制返回 0x00，触发全白丢线，切断动力，防止带旧缓存疯跑！
+        if (i2c_error_count > I2C_ERROR_THRESHOLD) {
+            return 0x00;
+        }
+    }
+
+    return last_sensor_data;
+}
+
+// ==========================================================
+// 算法引擎：动态加权质心（消灭 256 种 if-else）
 // ==========================================================
 static float Calculate_Line_Error(uint8_t sensor_bits) {
-    // 权重定义：从左到右 (传感器 1-8) 对应误差 -4 到 4
-    // 这样 4、5 号中间位置误差刚好为 0
     float weights[8] = {-4.5f, -3.0f, -1.5f, -0.5f, 0.5f, 1.5f, 3.0f, 4.5f};
     float sum = 0;
     int count = 0;
@@ -54,17 +105,17 @@ static float Calculate_Line_Error(uint8_t sensor_bits) {
             count++;
         }
     }
-    // 如果有探头扫到线，计算平均质心偏移；否则维持现状
+    // 有线算平均质心，无线则靠视觉惯性滑行
     return (count > 0) ? (sum / (float)count) : last_valid_error;
 }
 
 // ==========================================================
-// 3. 初始化 (同步网络诊断)
+// 系统初始化
 // ==========================================================
 void Track_App_Init(void) {
     uint8_t ping_val = 0;
-    osDelay(500); // 等待传感器内部 MCU 初始化
-    // 遵循手册 7.13，Ping 不通不发车
+    osDelay(500);
+    // 强制握手，不握手不发车
     while (ping_val != 0x66) {
         HAL_I2C_Mem_Read(&hi2c1, GW_GRAY_ADDR, REG_PING, I2C_MEMADD_SIZE_8BIT, &ping_val, 1, 10);
         osDelay(50);
@@ -72,84 +123,109 @@ void Track_App_Init(void) {
 }
 
 // ==========================================================
-// 4. 核心任务循环 (重构状态机)
+// 决策层状态机主循环 (绝对不饿死看门狗)
 // ==========================================================
 void Track_App_TaskLoop(void) {
+    // 1. 【全局安全熔断】：监控测温标志位 (假设 system_def.h 里有 extern volatile uint8_t system_alarm_flag)
+    if (system_alarm_flag == 1) {
+        track_is_turning = 0; // 交出路权，让内环去执行刹车
+        osDelay(20);
+        return;
+    }
+
     uint8_t sensor_val = Fetch_Sensor_Raw();
 
-    // 情况 A：全白丢线
+    // 2. 【全白丢线保护】
     if (sensor_val == 0) {
         is_lost_line = 1;
+        osDelay(10);
         return;
     }
 
-    // 情况 B：突遇左直角弯 (参考同仁Turning检测)
-    // 只要左侧三路压满，判定为直角
-    if ((sensor_val & 0b00000111) == 0b00000111) {
-        osThreadSuspend(MotionTaskHandle); // 1. 物理点穴
+    // 3. 【找回路线动能绞杀】
+    if (is_lost_line == 1) {
+        track_is_turning = 1; // 夺权制动
+        R3X_Set_Speed(MOTOR_FL, PWM_BRAKE); R3X_Set_Speed(MOTOR_RL, PWM_BRAKE);
+        R3X_Set_Speed(MOTOR_FR, PWM_BRAKE); R3X_Set_Speed(MOTOR_RR, PWM_BRAKE);
+        osDelay(80);
 
-        // 2. 入弯主动反接制动 (解决 800px/s 惯性)
-        R3X_Set_Speed(MOTOR_FL, -500); R3X_Set_Speed(MOTOR_RL, -500);
-        R3X_Set_Speed(MOTOR_FR, -500); R3X_Set_Speed(MOTOR_RR, -500);
-        osDelay(40);
+        target_yaw = current_yaw; // 清空盲转时累积的旧账
+        is_lost_line = 0;
+        track_is_turning = 0;     // 归还路权
+        osDelay(10);
+        return;
+    }
 
-        // 3. 盲转逃逸 (快速甩出直角顶点)
-        R3X_Set_Speed(MOTOR_FL, 700); R3X_Set_Speed(MOTOR_RL, 700);
-        R3X_Set_Speed(MOTOR_FR, -400); R3X_Set_Speed(MOTOR_RR, -400);
-        osDelay(120);
+    // 4. 【突变特征拦截：左直角弯】
+    if ((sensor_val & SENSOR_LEFT_TURN_TRIGGER) == SENSOR_LEFT_TURN_TRIGGER) {
+        track_is_turning = 1;
 
-        // 4. 中心捕获 (死等 4,5 号对正)
-        while (!(Fetch_Sensor_Raw() & 0b00011000)) {
-            osDelay(5);
+        // a. 电子刹车吸收直线动能
+        R3X_Set_Speed(MOTOR_FL, PWM_BRAKE); R3X_Set_Speed(MOTOR_RL, PWM_BRAKE);
+        R3X_Set_Speed(MOTOR_FR, PWM_BRAKE); R3X_Set_Speed(MOTOR_RR, PWM_BRAKE);
+        osDelay(60);
+
+        // b. 左侧倒车，右侧前进，实现原地强力甩尾
+        R3X_Set_Speed(MOTOR_FL, PWM_TURN_REV); R3X_Set_Speed(MOTOR_RL, PWM_TURN_REV);
+        R3X_Set_Speed(MOTOR_FR, PWM_TURN_FWD); R3X_Set_Speed(MOTOR_RR, PWM_TURN_FWD);
+        osDelay(150); // 盲转逃离顶点
+
+        // c. 死锁等待出弯条件
+        while (!(Fetch_Sensor_Raw() & SENSOR_CENTER_LOCK)) {
+            if (system_alarm_flag == 1) { track_is_turning = 0; osDelay(10); return; } // 死锁时保持测温警觉
+
+            // 维持固定甩尾动力
+            R3X_Set_Speed(MOTOR_FL, PWM_TURN_REV); R3X_Set_Speed(MOTOR_RL, PWM_TURN_REV);
+            R3X_Set_Speed(MOTOR_FR, PWM_TURN_FWD);  R3X_Set_Speed(MOTOR_RR, PWM_TURN_FWD);
+            osDelay(10); // 绝对防饿死
         }
 
-        // 5. 退出锁死并对齐航向
-        extern volatile float current_yaw, target_yaw;
+        // d. 退出修正
         target_yaw = current_yaw;
-        is_lost_line = 0;
-        osThreadResume(MotionTaskHandle);
+        track_is_turning = 0;
+        osDelay(10);
         return;
     }
 
-    // 情况 C：突遇右直角弯 (极性对称)
-    if ((sensor_val & 0b11100000) == 0b11100000) {
-        osThreadSuspend(MotionTaskHandle);
-        R3X_Set_Speed(MOTOR_FL, -500); R3X_Set_Speed(MOTOR_RL, -500);
-        R3X_Set_Speed(MOTOR_FR, -500); R3X_Set_Speed(MOTOR_RR, -500);
-        osDelay(40);
-        R3X_Set_Speed(MOTOR_FL, -400); R3X_Set_Speed(MOTOR_RL, -400);
-        R3X_Set_Speed(MOTOR_FR, 700); R3X_Set_Speed(MOTOR_RR, 700);
-        osDelay(120);
-        while (!(Fetch_Sensor_Raw() & 0b00011000)) osDelay(5);
-        extern volatile float current_yaw, target_yaw;
+    // 5. 【突变特征拦截：右直角弯】
+    if ((sensor_val & SENSOR_RIGHT_TURN_TRIGGER) == SENSOR_RIGHT_TURN_TRIGGER) {
+        track_is_turning = 1;
+
+        R3X_Set_Speed(MOTOR_FL, PWM_BRAKE); R3X_Set_Speed(MOTOR_RL, PWM_BRAKE);
+        R3X_Set_Speed(MOTOR_FR, PWM_BRAKE); R3X_Set_Speed(MOTOR_RR, PWM_BRAKE);
+        osDelay(60);
+
+        R3X_Set_Speed(MOTOR_FL, PWM_TURN_FWD); R3X_Set_Speed(MOTOR_RL, PWM_TURN_FWD);
+        R3X_Set_Speed(MOTOR_FR, PWM_TURN_REV); R3X_Set_Speed(MOTOR_RR, PWM_TURN_REV);
+        osDelay(150);
+
+        while (!(Fetch_Sensor_Raw() & SENSOR_CENTER_LOCK)) {
+            if (system_alarm_flag == 1) { track_is_turning = 0; osDelay(10); return; }
+            R3X_Set_Speed(MOTOR_FL, PWM_TURN_FWD); R3X_Set_Speed(MOTOR_RL, PWM_TURN_FWD);
+            R3X_Set_Speed(MOTOR_FR, PWM_TURN_REV); R3X_Set_Speed(MOTOR_RR, PWM_TURN_REV);
+            osDelay(10);
+        }
+
         target_yaw = current_yaw;
-        is_lost_line = 0;
-        osThreadResume(MotionTaskHandle);
+        track_is_turning = 0;
+        osDelay(10);
         return;
     }
 
-    // 情况 D：常规质心巡航
+    // 6. 【常规微调：数学引擎接管】
     float error = Calculate_Line_Error(sensor_val);
     last_valid_error = error;
 
-    extern volatile float current_yaw, target_yaw;
-    // 刚刚扫回线，执行电子刹车 80ms
-    if (is_lost_line) {
-        osThreadSuspend(MotionTaskHandle);
-        R3X_Set_Speed(MOTOR_FL, 0); R3X_Set_Speed(MOTOR_RL, 0);
-        R3X_Set_Speed(MOTOR_FR, 0); R3X_Set_Speed(MOTOR_RR, 0);
-        osDelay(80);
-        target_yaw = current_yaw;
-        is_lost_line = 0;
-        osThreadResume(MotionTaskHandle);
-    }
-
-    // 串级叠加
+    // 只下达目标航向指令，绝不碰 PWM
     target_yaw += (error * Kp_outer);
 
-    // 物理墙限幅：禁止目标航向与实际航向偏差超过 35 度，防止漂移报复
+    // 【抗积分风转锁】物理墙：禁止目标角过度超前物理角度
     if (target_yaw - current_yaw > 35.0f) target_yaw = current_yaw + 35.0f;
     if (target_yaw - current_yaw < -35.0f) target_yaw = current_yaw - 35.0f;
 
-    // 归一化处理... (略)
+    // 欧拉角环绕归一化
+    if (target_yaw > 180.0f) target_yaw -= 360.0f;
+    else if (target_yaw < -180.0f) target_yaw += 360.0f;
+
+    osDelay(10); // 常规出口绝不饿死 CPU
 }
