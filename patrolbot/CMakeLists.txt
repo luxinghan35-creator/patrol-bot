@@ -50,6 +50,8 @@ add_executable(${CMAKE_PROJECT_NAME}
         Core/APP/chassis/chassis_app.c
         Core/APP/monitor/monitor_app.h
         Core/APP/monitor/monitor_app.c
+        Core/BSP/jy61p/jy61p.c
+        Core/BSP/jy61p/jy61p.h
 )
 
 # Add STM32CubeMX generated sources
@@ -82,6 +84,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
         Core/APP/chassis/chassis_app.h
         Core/APP/monitor/monitor_app.c
         Core/APP/monitor/monitor_app.h
+        Core/BSP/jy61p/jy61p.c
+        Core/BSP/jy61p/jy61p.h
 )
 
 # Add include paths
@@ -95,6 +99,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
         Core/BSP/oled
         Core/APP/chassis
         Core/APP/monitor
+        Core/BSP/jy61p
         Core/APP
 )
 

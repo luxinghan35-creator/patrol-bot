@@ -23,7 +23,7 @@
 #include "tim.h"
 #include "usart.h"
 #include "gpio.h"
-
+#include "jy61p.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "motor_driver.h"
@@ -60,29 +60,10 @@ void MX_FREERTOS_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-// GCC 编译器的 printf 重定向底层函数
-#ifdef __GNUC__
-int _write(int file, char *ptr, int len)
-{
-  HAL_UART_Transmit(&huart1, (uint8_t*)ptr, len, HAL_MAX_DELAY);
-  return len;
-}
-#endif
-
-// JY61P 串口状态机专属变量
-uint8_t rx_byte; //单字节接收缓冲
-uint8_t rx_buffer[11]; //完整帧缓冲 (0x55 + 10 字节数据)
-uint8_t rx_index = 0; // 当前接收状态索引
-
 // 实时偏航角，因跨任务共享故加volatile防止编译器优化导致的访问异常
 volatile float current_yaw = 0.0f;
 // 目标偏航角，因跨任务共享故加volatile防止编译器优化导致的访问异常
 volatile float target_yaw = 0.0f;
-
-// 【新增探针】用于监视状态机是否健康解析：有效帧发送
-volatile uint32_t rx_frame_cnt = 0;
-
-
 /* USER CODE END 0 */
 
 /**
@@ -122,7 +103,7 @@ int main(void)
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
   // 启动 JY61P 专属通道 (USART3) 的单字节中断接收
-  HAL_UART_Receive_IT(&huart3, &rx_byte, 1);
+ JY61P_Init(&huart3);
   R3X_Init();
   /* USER CODE END 2 */
 
@@ -195,50 +176,16 @@ void SystemClock_Config(void)
  * @param   huart 触发中断的串口句柄
  */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
-  if (huart->Instance == USART3) {
-    // --- 工业级强逻辑状态机 ---
-    if (rx_index == 0) {
-      if (rx_byte == 0x55) { // 第一步：必须踩中 0x55 帧头
-        rx_buffer[0] = rx_byte;
-        rx_index = 1;
-      }
-    } else if (rx_index == 1) {
-      if (rx_byte == 0x53) { // 第二步：必须是角度包 0x53
-        rx_buffer[1] = rx_byte;
-        rx_index = 2;
-      } else {
-        // 如果是 0x51(加速度), 0x52(角速度)，直接踢掉，重新找 0x55
-        rx_index = 0;
-      }
-    } else {
-      // 第三步：无脑接收剩余的 9 个字节
-      rx_buffer[rx_index] = rx_byte;
-      rx_index++;
-      if (rx_index >= 11) {
-        // 完美收齐 11 字节，解算角度
-        int16_t yaw_raw = (rx_buffer[7] << 8) | rx_buffer[6];
-        current_yaw = ((float)yaw_raw / 32768.0f) * 180.0f;
-        rx_frame_cnt++; // 解析帧数暴涨，证明系统健康！
-        rx_index = 0;
-      }
-    }
-    // 永动机重启
-    HAL_UART_Receive_IT(&huart3, &rx_byte, 1);
-  }
+  JY61P_RxCpltCallback(huart); // JY61P 去领自己的数据
+  // 未来如果加了 ESP32： ESP32_RxCpltCallback(huart);
 }
 
 /**
  * @brief   串口通信错误自愈回调函数
  * @details 应对 DMA/IT 接收中途发生的 ORE (溢出错误) 等硬件异常，强行清除标志位并重启接收。
  */
-void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
-{
-  if (huart->Instance == USART3) {
-    // 暴力清除 Overrun Error 标志位，防止中断卡死
-    __HAL_UART_CLEAR_OREFLAG(huart);
-    //重新接管总线
-    HAL_UART_Receive_IT(&huart3, &rx_byte, 1);
-  }
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
+  JY61P_ErrorCallback(huart);
 }
 
 /* USER CODE END 4 */
